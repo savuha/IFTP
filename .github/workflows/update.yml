@@ -1,0 +1,33 @@
+name: Обновление закупок ИФТП
+
+on:
+  schedule:
+    - cron: '0 6,12 * * *'   # 9:00 и 15:00 по Москве (UTC+3)
+  workflow_dispatch:          # кнопка запуска вручную
+
+permissions:
+  contents: write
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Парсинг ЕИС
+        run: python parse_zakupki_iftp.py
+
+      - name: Коммит обновлённых данных
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add iftp_zakupki_data.json parser_state.json
+          git diff --cached --quiet || git commit -m "Закупки: $(date '+%d.%m.%Y %H:%M МСК')"
+          git push
