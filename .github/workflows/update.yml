@@ -3,14 +3,27 @@ name: Обновление закупок ИФТП
 on:
   schedule:
     - cron: '0 6,12 * * *'   # 9:00 и 15:00 по Москве (UTC+3)
-  workflow_dispatch:          # кнопка запуска вручную
+  workflow_dispatch:          # кнопка запуска вручную, с опцией --debug
+    inputs:
+      debug:
+        description: 'Сохранять сырые HTML в ./debug (для диагностики селекторов)'
+        type: boolean
+        default: false
+
+# ВАЖНО: zakupki.gov.ru блокирует запросы с облачных IP GitHub-хостед раннеров
+# (проверено: TLS-соединение обрывается). Поэтому job обязан выполняться на
+# self-hosted раннере с российским IP (см. README → «Self-hosted runner»).
+concurrency:
+  group: iftp-parse
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   parse:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, iftp-parser]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -19,15 +32,35 @@ jobs:
           python-version: '3.12'
 
       - name: Зависимости
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install --disable-pip-version-check -q requests beautifulsoup4 lxml
 
       - name: Парсинг ЕИС
-        run: python parse_zakupki_iftp.py
+        run: python parse_zakupki_iftp.py ${{ inputs.debug && '--debug' || '' }}
 
       - name: Коммит обновлённых данных
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add iftp_zakupki_data.json parser_state.json
-          git diff --cached --quiet || git commit -m "Закупки: $(date '+%d.%m.%Y %H:%M МСК')"
-          git push
+          if git diff --cached --quiet; then
+            echo "Нет изменений — пропускаем коммит."
+            exit 0
+          fi
+          git commit -m "Закупки: $(date '+%d.%m.%Y %H:%M МСК')"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push отклонён (attempt $attempt), подтягиваю изменения и повторяю..."
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+          done
+          echo "::error::Не удалось запушить после 3 попыток"
+          exit 1
+
+      - name: Загрузить debug-страницы как артефакт
+        if: ${{ inputs.debug }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-html
+          path: debug/
+          retention-days: 7

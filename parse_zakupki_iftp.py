@@ -48,8 +48,10 @@ logging.basicConfig(filename=str(HERE / "parser.log"), level=logging.INFO,
 log = logging.getLogger("iftp-parser")
 
 PAUSE     = (0.6, 1.4)   # пауза между запросами, сек
-MAX_PAGES = 4            # страниц поиска на термин (по 50 извещений)
+MAX_PAGES = 6            # страниц поиска на термин (по 50 извещений) — показываем ВСЕ подходящие
 CACHE_TTL = 20           # часов: через сколько обновлять карточку в кэше
+REQ_TIMEOUT = 25         # сек на попытку (было 40 — на блокирующем IP это душило job на часы)
+RETRIES = 2              # попыток на запрос (было 3)
 
 # ----------------------------------------------------------------------------
 # СЛОВАРЬ ПРОДУКЦИИ ИФТП (ключи категорий = чипы на дашборде)
@@ -137,16 +139,23 @@ def ru_dt(s):
 # ----------------------------------------------------------------------------
 sess = requests.Session(); sess.headers.update(UA)
 
+NET_ERRORS = 0  # счётчик сетевых сбоев подряд — сигнал блокировки/недоступности сайта
+
 def get(url, **kw):
-    for attempt in range(3):
+    global NET_ERRORS
+    for attempt in range(RETRIES):
         try:
-            r = sess.get(url, timeout=40, **kw)
+            r = sess.get(url, timeout=REQ_TIMEOUT, **kw)
             if r.status_code == 200:
                 r.encoding = "utf-8"
+                NET_ERRORS = 0
                 return r.text
-            log.warning("HTTP %s %s", r.status_code, url)
+            msg = f"HTTP {r.status_code} {url}"
+            log.warning(msg); print("  ! " + msg, flush=True)
         except requests.RequestException as e:
-            log.warning("request error (%s) %s", e, url)
+            msg = f"сетевая ошибка ({e.__class__.__name__}: {e}) {url}"
+            log.warning(msg); print("  ! " + msg, flush=True)
+            NET_ERRORS += 1
         time.sleep(random.uniform(2, 5) * (attempt + 1))
     return None
 
@@ -162,7 +171,8 @@ def search_notices(term, debug=False):
         params = {
             "searchString": term, "morphology": "on",
             "search-filter": "Дате размещения", "sortBy": "UPDATE_DATE",
-            "sortDirection": "false", "recordsPerPage": "_50", "page": str(page),
+            "sortDirection": "false", "recordsPerPage": "_50",
+            "pageNumber": str(page),  # реальное имя параметра пагинации на zakupki.gov.ru
             "fz44": "on", "fz223": "on",
             "af": "on", "ca": "on", "pa": "on",
             "currencyIdGeneral": "-1",
@@ -272,6 +282,12 @@ def main():
         res = search_notices(term, debug=args.debug and i == 1)
         candidates.update(res)
         print(f"[{i}/{len(SEARCH_TERMS)}] '{term}' → всего найдено: {len(candidates)}", flush=True)
+        if NET_ERRORS >= 6:
+            msg = ("СТОП: 6 сетевых сбоев подряд к zakupki.gov.ru. Похоже, сайт недоступен "
+                   "с этого IP (геоблокировка/бан) или сменилась разметка/URL поиска. "
+                   "Запустите на РФ-хосте с --debug и проверьте debug/*.html.")
+            log.error(msg); print("!!! " + msg, flush=True)
+            sys.exit(1)
         polite()
 
     fresh, need = {}, []
